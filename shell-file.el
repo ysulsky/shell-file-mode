@@ -6,6 +6,10 @@
 (defcustom shell-file-dir (format "/tmp/shell-file.%s" (user-login-name))
   "Where shell-file commands and output will be logged")
 
+(defcustom shell-file-remote-host nil
+  "Remote host to execute shell-file commands on.
+Set this to a string like \"user@host\" to enable remote execution.")
+
 (setq shell-file-init-line-re "^### START #########################.*\n")
 (setq shell-file-exit-line-re "^exit ##############################.*\n")
 
@@ -191,35 +195,68 @@ exit ###############################################################
             (throw 'body (switch-to-buffer name)))
           (setq slot (+ slot 1)))))))
 
+
+(defun shell-file-log (message)
+  "Log a message to the *Messages* buffer."
+  (message "[Shell-File] %s" message))
+
+
 (defun shell-file-run ()
-  "run shell-file top block in the background"
+  "Run shell-file top block in the background, locally or remotely."
   (interactive)
   (when (shell-file-current-buffer-is-block-buffer)
     (shell-file-bubble-block t))
-  (let*
-      (;; compute log files
-       (dir shell-file-dir)
-       (_   (mkdir dir t))
-       (uid (format-time-string "%Y-%m-%d.%H:%M:%S"))
-       (cmd (format "%s/%s.command" dir uid))
-       (out (format "%s/%s.output" dir uid))
-       ;; write out block
-       (_
-        (save-window-excursion
-          (save-excursion
-            (shell-file-find)
-            (goto-char (point-min))
-            (search-forward-regexp (shell-file-exit-line))
-            (write-region (point-min) (match-end 0) cmd))))
-       ;; execute block
-       (_ (chmod cmd
-                 (file-modes-symbolic-to-number "u+x" (file-modes cmd))))
-       (cmd (format "%s 2>&1 | tee %s" cmd out))
-       (buf (save-window-excursion (shell-file-output)))
-       (_ (async-shell-command cmd buf))
-       (_ (display-buffer buf nil 'visible))
-       )
-    nil))
+  (let* ((remote-prefix (when shell-file-remote-host
+                          (format "/ssh:%s:" shell-file-remote-host)))
+         (default-directory (if remote-prefix
+                                (concat remote-prefix "/")
+                              default-directory))
+         (dir (if remote-prefix
+                  (concat remote-prefix shell-file-dir)
+                shell-file-dir))
+         (_   (make-directory dir t))
+         (uid (format-time-string "%Y-%m-%d.%H:%M:%S"))
+         (cmd-file (expand-file-name (format "%s.command" uid) dir))
+         (out-file (expand-file-name (format "%s.output" uid) dir)))
+
+    ;; Write out block
+    (save-window-excursion
+      (save-excursion
+        (shell-file-find)
+        (goto-char (point-min))
+        (search-forward-regexp (shell-file-exit-line))
+        (setq block-end (match-beginning 0))
+        (write-region (point-min) block-end cmd-file)))
+
+    ;; Set execute permissions
+    (shell-file-log (format "Setting execute permissions for %s" cmd-file))
+    (set-file-modes cmd-file #o755)
+
+    ;; Prepare command
+    (setq full-cmd (format "bash %s 2>&1 | tee %s"
+                           (file-local-name cmd-file)
+                           (file-local-name out-file)))
+
+    ;; Log the command
+    (shell-file-log (format "Executing command: %s" full-cmd))
+    (shell-file-log (format "Remote host: %s" (or shell-file-remote-host "local")))
+    (shell-file-log (format "Working directory: %s" default-directory))
+
+    ;; Execute command
+    (let ((buf (save-window-excursion (shell-file-output))))
+      (async-shell-command full-cmd buf)
+      (display-buffer buf nil 'visible))
+
+    ;; Log completion
+    (shell-file-log "Command execution initiated.")))
+
+
+(defun shell-file-set-remote-host (host)
+  "Set the remote host for shell-file execution."
+  (interactive "sEnter remote host (user@host): ")
+  (setq shell-file-remote-host (if (string-empty-p host) nil host))
+  (message "Remote host set to %s" (or shell-file-remote-host "nil (local execution)")))
+
 
 (defun shell-file-define-global-keys (map key-prefix)
   "add shell-file keybindings that should be available globally"
@@ -229,7 +266,8 @@ exit ###############################################################
          (shell-file-insert-block "i" "\C-i")
          (shell-file-insert-file "x" "\C-x")
          (shell-file-insert-cd "g" "\C-g")
-         (shell-file-run "r" "\C-r")))
+         (shell-file-run "r" "\C-r")
+         (shell-file-set-remote-host "h" "\C-h")))
     (let* ((def (car binding))
            (keys (cdr binding)))
       (dolist (key keys)
