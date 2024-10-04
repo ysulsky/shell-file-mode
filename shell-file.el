@@ -200,7 +200,6 @@ exit ###############################################################
   "Log a message to the *Messages* buffer."
   (message "[Shell-File] %s" message))
 
-
 (defun shell-file-run ()
   "Run shell-file top block in the background, locally or remotely."
   (interactive)
@@ -216,40 +215,47 @@ exit ###############################################################
                 shell-file-dir))
          (_   (make-directory dir t))
          (uid (format-time-string "%Y-%m-%d.%H:%M:%S"))
-         (cmd-file (expand-file-name (format "%s.command" uid) dir))
          (out-file (expand-file-name (format "%s.output" uid) dir)))
 
-    ;; Write out block
-    (save-window-excursion
-      (save-excursion
-        (shell-file-find)
-        (goto-char (point-min))
-        (search-forward-regexp (shell-file-exit-line))
-        (setq block-end (match-beginning 0))
-        (write-region (point-min) block-end cmd-file)))
-
-    ;; Set execute permissions
-    (shell-file-log (format "Setting execute permissions for %s" cmd-file))
-    (set-file-modes cmd-file #o755)
-
-    ;; Prepare command
-    (setq full-cmd (format "bash %s 2>&1 | tee %s"
-                           (file-local-name cmd-file)
-                           (file-local-name out-file)))
-
-    ;; Log the command
-    (shell-file-log (format "Executing command: %s" full-cmd))
+    (shell-file-log "Preparing to run command...")
     (shell-file-log (format "Remote host: %s" (or shell-file-remote-host "local")))
     (shell-file-log (format "Working directory: %s" default-directory))
 
-    ;; Execute command
-    (let ((buf (save-window-excursion (shell-file-output))))
-      (async-shell-command full-cmd buf)
+    (shell-file-write-command-file out-file)
+    (shell-file-execute-command out-file remote-prefix)))
+
+(defun shell-file-write-command-file (cmd-file)
+  "Write the shell-file command to the specified file, including the prelude and first block."
+  (shell-file-log (format "Writing command to %s" cmd-file))
+  (save-window-excursion
+    (save-excursion
+      (shell-file-find)
+      (goto-char (point-min))
+      (let ((block-end (progn
+                         (search-forward-regexp (shell-file-init-line))
+                         (search-forward-regexp (shell-file-exit-line))
+                         (search-forward-regexp "^")
+                         (match-beginning 0))))
+        (let ((content (buffer-substring-no-properties (point-min) block-end)))
+          (write-region content nil cmd-file))))))
+
+(defun shell-file-execute-command (out-file remote-prefix)
+  "Execute the shell-file command, locally or remotely."
+  (let* ((out-file-local (file-local-name out-file))
+         (full-cmd (format "bash %s 2>&1 | tee -a %s"
+                           (shell-quote-argument out-file-local)
+                           (shell-quote-argument out-file-local))))
+    (shell-file-log (format "Executing command: %s" full-cmd))
+    (let ((buf (shell-file-output)))
+      (if remote-prefix
+          (let ((remote-cmd (format "ssh %s %s"
+                                    (shell-quote-argument (file-remote-p remote-prefix 'host))
+                                    (shell-quote-argument full-cmd))))
+            (shell-file-log (format "Remote command: %s" remote-cmd))
+            (async-shell-command remote-cmd buf))
+        (async-shell-command full-cmd buf))
       (display-buffer buf nil 'visible))
-
-    ;; Log completion
     (shell-file-log "Command execution initiated.")))
-
 
 (defun shell-file-set-remote-host (host)
   "Set the remote host for shell-file execution."
@@ -257,6 +263,12 @@ exit ###############################################################
   (setq shell-file-remote-host (if (string-empty-p host) nil host))
   (message "Remote host set to %s" (or shell-file-remote-host "nil (local execution)")))
 
+(defun shell-file-visit-outputs ()
+  (interactive)
+  (dired shell-file-dir)
+  (dired-sort-other "-lt")  ;; Sort by time, newest first.
+  (goto-char (point-min))
+  (forward-line))
 
 (defun shell-file-define-global-keys (map key-prefix)
   "add shell-file keybindings that should be available globally"
@@ -267,7 +279,8 @@ exit ###############################################################
          (shell-file-insert-file "x" "\C-x")
          (shell-file-insert-cd "g" "\C-g")
          (shell-file-run "r" "\C-r")
-         (shell-file-set-remote-host "h" "\C-h")))
+         (shell-file-set-remote-host "h" "\C-h")
+         (shell-file-visit-outputs "o" "\C-o")))
     (let* ((def (car binding))
            (keys (cdr binding)))
       (dolist (key keys)
