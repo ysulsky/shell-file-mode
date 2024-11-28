@@ -242,7 +242,7 @@ exit ###############################################################
 (defun shell-file-execute-command (out-file remote-prefix)
   "Execute the shell-file command, locally or remotely."
   (let* ((out-file-local (file-local-name out-file))
-         (full-cmd (format "sed -n %s %s; echo; bash %s 2>&1 | tee -a %s"
+         (full-cmd (format "(sed -n %s %s; echo; script -qc 'bash -i %s' /dev/null 0<&0) 2>&1 | tee -a %s"
                            (shell-quote-argument
                              (concat "/" (replace-regexp-in-string "\n$" "" shell-file-init-line-re) "/,$p"))
                            (shell-quote-argument out-file-local)
